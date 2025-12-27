@@ -77,42 +77,65 @@ class RequestHandler:
         )
 
     # =========================
-    # 新增：适配 /reader/... URL
+    # 新增：URL 入口解析 book_id
     # =========================
-    def parse_book_id_from_reader_url(self, reader_url: str) -> str:
+    @staticmethod
+    def _extract_book_id_from_html(html: str) -> str | None:
         """
-        从 /reader/... 页面中解析真正的 book_id
-        reader_url 例如:
-        https://fanqienovel.com/reader/7462275513550127641?source=seo_fq_juhe
+        从 HTML 中尽可能解析出 book_id（多种兜底规则）
+        返回字符串 book_id 或 None
         """
-        response = self.session.get(reader_url, headers=self.get_headers())
-        if response.status_code != 200:
-            raise ConnectionError(f"无法访问 reader 页面，状态码: {response.status_code}")
-
-        html = response.text
-
-        # 常见：bookId 在页面的初始化 state 里（字段名可能会变，这里做多种兜底）
         patterns = [
             r'"bookId"\s*:\s*"(\d+)"',
             r'"book_id"\s*:\s*"(\d+)"',
             r'"book_id"\s*:\s*(\d+)',
             r'"bookId"\s*:\s*(\d+)',
-            r'/page/(\d+)',  # 兜底：页面里可能直接出现 /page/{book_id}
+            r'/page/(\d+)',  # 兜底：页面里直接出现 /page/{book_id}
         ]
         for p in patterns:
             m = re.search(p, html)
             if m:
                 return m.group(1)
+        return None
 
-        raise ValueError("未能从 reader 页面解析出 book_id（可能页面结构更新，需要调整正则）")
+    def parse_book_id_from_reader_url(self, reader_url: str) -> str:
+        """
+        从 /reader/... 页面中解析真正的 book_id
+        例如:
+        https://fanqienovel.com/reader/7462275513550127641?source=...
+        """
+        response = self.session.get(reader_url, headers=self.get_headers())
+        if response.status_code != 200:
+            raise ConnectionError(f"无法访问 reader 页面，状态码: {response.status_code}")
+
+        book_id = self._extract_book_id_from_html(response.text)
+        if not book_id:
+            raise ValueError("未能从 reader 页面解析出 book_id（可能页面结构更新，需要调整正则）")
+        return book_id
+
+    def parse_book_id_from_keyword_url(self, keyword_url: str) -> str:
+        """
+        从 /keyword/... 页面中解析真正的 book_id
+        例如:
+        https://fanqienovel.com/keyword/7504767984825747465
+        """
+        response = self.session.get(keyword_url, headers=self.get_headers())
+        if response.status_code != 200:
+            raise ConnectionError(f"无法访问 keyword 页面，状态码: {response.status_code}")
+
+        book_id = self._extract_book_id_from_html(response.text)
+        if not book_id:
+            raise ValueError("未能从 keyword 页面解析出 book_id（可能页面结构更新，需要调整正则）")
+        return book_id
 
     def book_id_from_any_url(self, url_or_id: str) -> str:
         """
-        支持三种输入:
+        支持输入：
         1) 纯数字 book_id: "1234567890"
         2) page 链接: https://fanqienovel.com/page/1234567890
-        3) reader 链接: https://fanqienovel.com/reader/xxxxxxxxxxxx?source=...
-        返回真正的 book_id
+        3) reader 链接: https://fanqienovel.com/reader/xxxxxxxxxxxx?...
+        4) keyword 链接: https://fanqienovel.com/keyword/xxxxxxxxxxxx
+        返回真正的 book_id（字符串）
         """
         s = (url_or_id or "").strip()
 
@@ -129,19 +152,25 @@ class RequestHandler:
         if "fanqienovel.com/reader/" in s:
             return self.parse_book_id_from_reader_url(s)
 
-        # 兜底：有些链接可能带了重定向或别的结构，尝试抓取页面再找 /page/{id}
+        # keyword 链接
+        if "fanqienovel.com/keyword/" in s:
+            return self.parse_book_id_from_keyword_url(s)
+
+        # 兜底：抓页面再找 book_id
         try:
-            response = self.session.get(s, headers=self.get_headers())
-            if response.status_code == 200:
-                html = response.text
-                m2 = re.search(r'/page/(\d+)', html)
-                if m2:
-                    return m2.group(1)
+            resp = self.session.get(s, headers=self.get_headers(), timeout=self.config.get("request_timeout", 10))
+            if resp.status_code == 200:
+                book_id = self._extract_book_id_from_html(resp.text)
+                if book_id:
+                    return book_id
         except Exception:
             pass
 
         raise ValueError(f"无法从输入解析 book_id: {url_or_id}")
 
+    # =========================
+    # 你原本的逻辑：保持不动
+    # =========================
     def get_book_info(self, book_id):
         """获取书名、作者、简介"""
         url = f'https://fanqienovel.com/page/{book_id}'
